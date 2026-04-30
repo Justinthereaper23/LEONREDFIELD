@@ -1,56 +1,54 @@
-# ScholarPay 🎓
+# SariEscrow 🛒
 
-> Instant USDC scholarship disbursement for students — powered by Stellar & Soroban.
+> **Trustless on-chain escrow for buyers and sellers across Southeast Asia — powered by Stellar & Soroban.**
 
 ---
 
 ## Problem
 
-A university student in the Philippines waits 2–4 weeks for scholarship funds processed through slow bank transfers, causing missed tuition deadlines and unnecessary late fees.
+A sari-sari store owner in Cebu, Philippines wants to bulk-order goods from a supplier in Makati she has never met. Sending payment upfront risks losing her ₱8,000 to a scam; the supplier refuses to ship without payment. The deadlock kills the deal and costs both parties a week of income.
 
 ## Solution
 
-ScholarPay lets universities deploy a Soroban smart contract that automatically releases USDC directly to verified student wallets on Stellar — no bank middleman, instant settlement, full on-chain transparency.
-
----
-
-## Timeline
-
-| Phase | Description | Duration |
-|-------|-------------|----------|
-| Week 1 | Contract development & local testing | 7 days |
-| Week 2 | Frontend MVP + testnet deployment | 7 days |
-| Week 3 | Demo prep & student wallet UX | 3 days |
+SariEscrow lets the buyer lock USDC into a Soroban smart contract with one tap. The supplier ships knowing funds are secured on Stellar. Once the buyer confirms receipt, the contract instantly releases USDC to the seller — no bank, no middleman, no 3–5 day clearing time. Disputes are resolved by a designated admin who can refund or release with a single on-chain call.
 
 ---
 
 ## Stellar Features Used
 
-- ✅ **USDC transfers** — stable disbursements in USD Coin on Stellar
-- ✅ **Soroban smart contracts** — trustless, auditable release logic
-- ✅ **Trustlines** — students must establish a USDC trustline before receiving funds
+| Feature | Why |
+|---|---|
+| **USDC (Stellar asset)** | Stable settlement currency; trustline required |
+| **Soroban smart contracts** | Enforce escrow logic, dispute resolution on-chain |
+| **XLM** | Transaction fees |
+| **Trustlines** | Buyer and seller opt in to USDC before transacting |
+
+---
+
+## Timeline
+
+| Phase | Duration | Deliverable |
+|---|---|---|
+| Smart contract + tests | Day 1–2 | `lib.rs` passing all 5 tests |
+| Stellar testnet deploy | Day 2 | Contract address on Futurenet |
+| React/Next.js frontend | Day 3–4 | Buyer & seller dashboards |
+| Demo polish + pitch | Day 5 | 2-min demo video |
 
 ---
 
 ## Vision & Purpose
 
-ScholarPay aims to eliminate the bureaucratic delay in scholarship disbursements across Southeast Asia. By anchoring funds on Stellar, universities gain full auditability and students receive money in seconds — not weeks. In the future, ScholarPay can integrate local anchors (e.g., GCash, Maya) to allow instant PHP conversion directly from the student's wallet.
+SariEscrow targets the 70 million unbanked and under-banked micro-merchants across SEA who rely on informal trust networks for trade. By replacing that trust with programmable escrow on Stellar, SariEscrow removes the single biggest barrier to SME e-commerce in the region: payment risk.
+
+Long-term: integrate local anchors (GCash, Maya, OVO) so buyers can fund USDC escrow directly from e-wallets with zero crypto knowledge required.
 
 ---
 
 ## Prerequisites
 
-- [Rust](https://www.rust-lang.org/tools/install) (stable, 1.74+)
-- [Soroban CLI](https://soroban.stellar.org/docs/getting-started/setup) v20+
-- Stellar Testnet account with XLM (use [Friendbot](https://friendbot.stellar.org))
-
-```bash
-# Install Soroban CLI
-cargo install --locked soroban-cli --version 20.0.0
-
-# Add Wasm target
-rustup target add wasm32-unknown-unknown
-```
+- **Rust** ≥ 1.74 (`rustup install stable`)
+- **Soroban CLI** ≥ 20.x (`cargo install --locked soroban-cli`)
+- **Stellar testnet account** with USDC trustline
 
 ---
 
@@ -58,7 +56,7 @@ rustup target add wasm32-unknown-unknown
 
 ```bash
 soroban contract build
-# Output: target/wasm32-unknown-unknown/release/scholar_pay.wasm
+# Output: target/wasm32-unknown-unknown/release/sari_escrow.wasm
 ```
 
 ---
@@ -67,91 +65,88 @@ soroban contract build
 
 ```bash
 cargo test
+# Runs all 5 unit tests in src/test.rs
 ```
-
-Expected: 5 tests pass ✅
 
 ---
 
 ## Deploy to Testnet
 
 ```bash
-# 1. Configure testnet identity
-soroban keys generate --global alice --network testnet
-
-# 2. Deploy the contract
 soroban contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/scholar_pay.wasm \
-  --source alice \
+  --wasm target/wasm32-unknown-unknown/release/sari_escrow.wasm \
+  --source <YOUR_SECRET_KEY> \
   --network testnet
-
-# Output: CONTRACT_ID (save this)
 ```
+
+Save the returned `CONTRACT_ID` for the CLI invocations below.
 
 ---
 
 ## Sample CLI Invocations
 
-### Initialize the contract
+### 1 — Create an order (buyer locks 50 USDC)
 ```bash
 soroban contract invoke \
   --id <CONTRACT_ID> \
-  --source alice \
+  --source <BUYER_SECRET> \
   --network testnet \
-  -- \
-  initialize \
-  --admin GADMIN...STELLARADDRESS \
-  --token GAUSDC...TOKENADDRESS
+  -- create_order \
+  --buyer  GBUYER... \
+  --seller GSELLER... \
+  --token  GUSDC... \
+  --amount 50000000 \
+  --admin  GADMIN...
 ```
+> Returns: `order_id` (e.g. `1`)
 
-### Register a student
+### 2 — Seller marks order as shipped
 ```bash
 soroban contract invoke \
   --id <CONTRACT_ID> \
-  --source alice \
+  --source <SELLER_SECRET> \
   --network testnet \
-  -- \
-  register_student \
-  --student GSTUDENT...ADDRESS \
-  --amount 5000000   # 0.5 USDC (7 decimal places)
+  -- mark_shipped \
+  --caller   GSELLER... \
+  --order_id 1
 ```
 
-### Release scholarship funds
+### 3 — Buyer confirms receipt (releases USDC to seller)
 ```bash
 soroban contract invoke \
   --id <CONTRACT_ID> \
-  --source alice \
+  --source <BUYER_SECRET> \
   --network testnet \
-  -- \
-  release \
-  --student GSTUDENT...ADDRESS
+  -- confirm_receipt \
+  --caller   GBUYER... \
+  --order_id 1
 ```
 
-### Check scholarship status
+### 4 — Raise a dispute
 ```bash
 soroban contract invoke \
   --id <CONTRACT_ID> \
+  --source <BUYER_SECRET> \
   --network testnet \
-  -- \
-  get_scholarship \
-  --student GSTUDENT...ADDRESS
+  -- raise_dispute \
+  --caller   GBUYER... \
+  --order_id 1
 ```
 
----
-
-## Project Structure
-
-```
-scholarpay/
-├── Cargo.toml
-├── README.md
-└── src/
-    ├── lib.rs      # Soroban smart contract
-    └── test.rs     # 5 unit tests
+### 5 — Admin resolves dispute (refund buyer)
+```bash
+soroban contract invoke \
+  --id <CONTRACT_ID> \
+  --source <ADMIN_SECRET> \
+  --network testnet \
+  -- resolve_dispute \
+  --caller      GADMIN... \
+  --order_id    1 \
+  --refund_buyer true
 ```
 
 ---
 
 ## License
 
-MIT © 2025 ScholarPay Contributors
+MIT © 2025 SariEscrow Contributors

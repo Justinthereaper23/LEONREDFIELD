@@ -1,5 +1,5 @@
 [package]
-name = "scholar_pay"
+name    = "sari_escrow"
 version = "0.1.0"
 edition = "2021"
 
@@ -12,14 +12,12 @@ soroban-sdk = { version = "20.0.0" }
 [dev-dependencies]
 soroban-sdk = { version = "20.0.0", features = ["testutils"] }
 
+# Optimise the Wasm binary for on-chain deployment
 [profile.release]
-opt-level = "z"         # Optimize for binary size (Wasm target)
-overflow-checks = true  # Keep overflow protection in release builds
-debug = 0
-strip = "symbols"
-lto = true
+opt-level     = "z"      # minimise binary size
+overflow-checks = true
+debug         = false
+strip         = "symbols"
+lto           = true
 codegen-units = 1
-
-[profile.release-with-logs]
-inherits = "release"
-debug-assertions = true
+panic         = "abort"

@@ -7,107 +7,185 @@ mod tests {
         Address, Env, IntoVal,
     };
 
-    /// Helper: sets up env, deploys contract, mints USDC to contract address.
-    fn setup() -> (Env, Address, Address, Address, Address) {
+    // -----------------------------------------------------------------------
+    // Helper: deploy a mock USDC token and mint `amount` to `recipient`
+    // -----------------------------------------------------------------------
+    fn setup_token(env: &Env, admin: &Address, recipient: &Address, amount: i128) -> Address {
+        let token_id = env.register_stellar_asset_contract(admin.clone());
+        let sac = StellarAssetClient::new(env, &token_id);
+        sac.mint(recipient, &amount);
+        token_id
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: deploy SariEscrow contract and return its client
+    // -----------------------------------------------------------------------
+    fn setup_contract(env: &Env) -> SariEscrowClient {
+        let contract_id = env.register_contract(None, SariEscrow);
+        SariEscrowClient::new(env, &contract_id)
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1 – Happy path
+    // Full MVP flow: create order → mark shipped → confirm receipt
+    // Buyer's USDC should end up in seller's wallet
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_happy_path_full_flow() {
         let env = Env::default();
         env.mock_all_auths();
 
-        // Parties
-        let admin = Address::generate(&env);
-        let student = Address::generate(&env);
+        let buyer  = Address::generate(&env);
+        let seller = Address::generate(&env);
+        let admin  = Address::generate(&env);
 
-        // Deploy a mock USDC token (Stellar Asset Contract)
-        let token_admin = Address::generate(&env);
-        let token_contract_id = env.register_stellar_asset_contract(token_admin.clone());
-        let token_sac = StellarAssetClient::new(&env, &token_contract_id);
-        let token = TokenClient::new(&env, &token_contract_id);
+        // Mint 1000 USDC to buyer
+        let token = setup_token(&env, &admin, &buyer, 1_000);
+        let client = setup_contract(&env);
 
-        // Deploy the ScholarPay contract
-        let contract_id = env.register_contract(None, ScholarPayContract);
-        let client = ScholarPayContractClient::new(&env, &contract_id);
+        // Give contract a token allowance via the buyer's mock auth
+        let token_client = TokenClient::new(&env, &token);
+        token_client.approve(&buyer, &client.address, &1_000, &200);
 
-        // Initialize
-        client.initialize(&admin, &token_contract_id);
+        // Step 1: Buyer creates order (locks 500 USDC into escrow)
+        let order_id = client.create_order(&buyer, &seller, &token, &500, &admin);
+        assert_eq!(order_id, 1);
 
-        // Mint 1000 USDC (in smallest units) to the contract so it can pay out
-        token_sac.mint(&contract_id, &1_000);
+        // Step 2: Seller marks order as shipped
+        client.mark_shipped(&seller, &order_id);
 
-        (env, contract_id, admin, student, token_contract_id)
+        // Step 3: Buyer confirms receipt → USDC flows to seller
+        client.confirm_receipt(&buyer, &order_id);
+
+        // Verify seller received the funds
+        assert_eq!(token_client.balance(&seller), 500);
+        assert_eq!(token_client.balance(&buyer), 500); // 1000 - 500
+
+        // Verify order status is Completed
+        let order = client.get_order(&order_id);
+        assert_eq!(order.status, OrderStatus::Completed);
     }
 
-    // TEST 1 — Happy path: register student and release scholarship end-to-end
+    // -----------------------------------------------------------------------
+    // Test 2 – Edge case / failure
+    // A non-seller address attempting to call mark_shipped should panic
+    // -----------------------------------------------------------------------
     #[test]
-    fn test_happy_path_register_and_release() {
-        let (env, contract_id, admin, student, token_contract_id) = setup();
-        let client = ScholarPayContractClient::new(&env, &contract_id);
-        let token = TokenClient::new(&env, &token_contract_id);
+    #[should_panic(expected = "only the seller can mark an order as shipped")]
+    fn test_unauthorized_mark_shipped() {
+        let env = Env::default();
+        env.mock_all_auths();
 
-        // Register the student with a 500-unit scholarship
-        client.register_student(&student, &500);
+        let buyer    = Address::generate(&env);
+        let seller   = Address::generate(&env);
+        let imposter = Address::generate(&env);
+        let admin    = Address::generate(&env);
 
-        // Balance before release
-        let before = token.balance(&student);
-        assert_eq!(before, 0);
+        let token = setup_token(&env, &admin, &buyer, 1_000);
+        let client = setup_contract(&env);
+        let token_client = TokenClient::new(&env, &token);
+        token_client.approve(&buyer, &client.address, &1_000, &200);
 
-        // Admin releases funds
-        client.release(&student);
+        let order_id = client.create_order(&buyer, &seller, &token, &300, &admin);
 
-        // Student should now have 500 units
-        let after = token.balance(&student);
-        assert_eq!(after, 500);
+        // Imposter tries to mark as shipped – should panic
+        client.mark_shipped(&imposter, &order_id);
     }
 
-    // TEST 2 — Edge case: double-release should panic
+    // -----------------------------------------------------------------------
+    // Test 3 – State verification
+    // After create_order, contract storage must reflect Funded status
+    // and the contract must hold the locked tokens
+    // -----------------------------------------------------------------------
     #[test]
-    #[should_panic(expected = "scholarship already released")]
-    fn test_double_release_panics() {
-        let (env, contract_id, admin, student, _) = setup();
-        let client = ScholarPayContractClient::new(&env, &contract_id);
+    fn test_state_after_create_order() {
+        let env = Env::default();
+        env.mock_all_auths();
 
-        client.register_student(&student, &200);
-        client.release(&student);
-        // Second release must panic
-        client.release(&student);
+        let buyer  = Address::generate(&env);
+        let seller = Address::generate(&env);
+        let admin  = Address::generate(&env);
+
+        let token = setup_token(&env, &admin, &buyer, 1_000);
+        let client = setup_contract(&env);
+        let token_client = TokenClient::new(&env, &token);
+        token_client.approve(&buyer, &client.address, &1_000, &200);
+
+        let order_id = client.create_order(&buyer, &seller, &token, &400, &admin);
+
+        // Fetch order from on-chain storage and assert fields
+        let order = client.get_order(&order_id);
+        assert_eq!(order.status, OrderStatus::Funded);
+        assert_eq!(order.amount, 400);
+        assert_eq!(order.buyer, buyer);
+        assert_eq!(order.seller, seller);
+
+        // Contract should hold exactly 400 USDC
+        assert_eq!(token_client.balance(&client.address), 400);
+        // Buyer should have 600 remaining
+        assert_eq!(token_client.balance(&buyer), 600);
     }
 
-    // TEST 3 — State verification: released flag is true after release
+    // -----------------------------------------------------------------------
+    // Test 4 – Dispute & admin refund
+    // Buyer raises dispute; admin resolves in buyer's favour → refund issued
+    // -----------------------------------------------------------------------
     #[test]
-    fn test_state_after_release() {
-        let (env, contract_id, admin, student, _) = setup();
-        let client = ScholarPayContractClient::new(&env, &contract_id);
+    fn test_dispute_and_refund() {
+        let env = Env::default();
+        env.mock_all_auths();
 
-        client.register_student(&student, &300);
+        let buyer  = Address::generate(&env);
+        let seller = Address::generate(&env);
+        let admin  = Address::generate(&env);
 
-        // Before release: released == false
-        let before = client.get_scholarship(&student);
-        assert!(!before.released);
-        assert_eq!(before.amount, 300);
+        let token = setup_token(&env, &admin, &buyer, 1_000);
+        let client = setup_contract(&env);
+        let token_client = TokenClient::new(&env, &token);
+        token_client.approve(&buyer, &client.address, &1_000, &200);
 
-        client.release(&student);
+        let order_id = client.create_order(&buyer, &seller, &token, &700, &admin);
+        client.mark_shipped(&seller, &order_id);
 
-        // After release: released == true
-        let after = client.get_scholarship(&student);
-        assert!(after.released);
+        // Buyer not happy – raises dispute
+        client.raise_dispute(&buyer, &order_id);
+        let order = client.get_order(&order_id);
+        assert_eq!(order.status, OrderStatus::Disputed);
+
+        // Admin refunds buyer
+        client.resolve_dispute(&admin, &order_id, &true);
+        let order = client.get_order(&order_id);
+        assert_eq!(order.status, OrderStatus::Refunded);
+
+        // Buyer gets their 700 USDC back
+        assert_eq!(token_client.balance(&buyer), 1_000);
+        assert_eq!(token_client.balance(&seller), 0);
     }
 
-    // TEST 4 — Edge case: registering unregistered student panics on release
+    // -----------------------------------------------------------------------
+    // Test 5 – Prevent double-completion
+    // Calling confirm_receipt twice on the same Completed order should panic
+    // -----------------------------------------------------------------------
     #[test]
-    #[should_panic(expected = "student not registered")]
-    fn test_release_unregistered_student_panics() {
-        let (env, contract_id, admin, student, _) = setup();
-        let client = ScholarPayContractClient::new(&env, &contract_id);
+    #[should_panic(expected = "order has not been marked as shipped yet")]
+    fn test_cannot_double_confirm() {
+        let env = Env::default();
+        env.mock_all_auths();
 
-        // Never registered — should panic
-        client.release(&student);
-    }
+        let buyer  = Address::generate(&env);
+        let seller = Address::generate(&env);
+        let admin  = Address::generate(&env);
 
-    // TEST 5 — Edge case: registering a student with zero amount should panic
-    #[test]
-    #[should_panic(expected = "amount must be positive")]
-    fn test_register_zero_amount_panics() {
-        let (env, contract_id, admin, student, _) = setup();
-        let client = ScholarPayContractClient::new(&env, &contract_id);
+        let token = setup_token(&env, &admin, &buyer, 1_000);
+        let client = setup_contract(&env);
+        let token_client = TokenClient::new(&env, &token);
+        token_client.approve(&buyer, &client.address, &1_000, &200);
 
-        client.register_student(&student, &0);
+        let order_id = client.create_order(&buyer, &seller, &token, &200, &admin);
+        client.mark_shipped(&seller, &order_id);
+        client.confirm_receipt(&buyer, &order_id); // first confirmation – ok
+
+        // Second confirm on same order – status is Completed, not Shipped → panic
+        client.confirm_receipt(&buyer, &order_id);
     }
 }
